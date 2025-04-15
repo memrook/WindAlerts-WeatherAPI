@@ -1,0 +1,19 @@
+version: '3'
+
+services:
+  weather-alert:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    restart: always
+    environment:
+      - OPENWEATHER_API_KEY=${OPENWEATHER_API_KEY}
+      - CITY=${CITY:-Moscow,RU}
+      - EMAIL_FROM=${EMAIL_FROM}
+      - EMAIL_TO=${EMAIL_TO}
+      - SMTP_SERVER=mail.agroconcern.ru
+      - SMTP_PORT=587
+      - SMTP_USER=${SMTP_USER}
+      - SMTP_PASSWORD=${SMTP_PASSWORD}
+    volumes:
+      - ./.env:/app/.env:ro 
