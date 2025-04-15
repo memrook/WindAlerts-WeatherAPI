@@ -1,16 +1,18 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"log"
 	"net/http"
-	"net/smtp"
 	"os"
+	"strconv"
 	"time"
 
 	"github.com/joho/godotenv"
+	"github.com/wneessen/go-mail"
 )
 
 // Константы для настройки приложения
@@ -18,6 +20,73 @@ const (
 	WindGustThreshold = 15.0 // Пороговое значение для порывов ветра в м/с
 	CheckInterval     = 3 * time.Hour
 )
+
+// HTML шаблон для письма с предупреждением
+const emailHTMLTemplate = `<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Уведомление о погоде</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f4;
+            margin: 0;
+            padding: 20px;
+        }
+        .container {
+            max-width: 600px;
+            margin: 0 auto;
+            background-color: #ffffff;
+            padding: 20px;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+        }
+        h1 {
+            color: #d9534f;
+            font-size: 24px;
+            text-align: center;
+        }
+        p {
+            font-size: 16px;
+            line-height: 1.5;
+            color: #333333;
+        }
+        .highlight {
+            font-weight: bold;
+            color: #d9534f;
+        }
+        .footer {
+            margin-top: 20px;
+            font-size: 14px;
+            color: #777777;
+            text-align: center;
+        }
+        @media only screen and (max-width: 600px) {
+            .container {
+                padding: 10px;
+            }
+            h1 {
+                font-size: 20px;
+            }
+            p {
+                font-size: 14px;
+            }
+        }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Внимание!</h1>
+        <p>Сегодня ожидаются <span class="highlight">сильные порывы ветра (%.2f м/с)</span>, что превышает безопасный порог (%.2f м/с).</p>
+        <p>Рекомендуется <span class="highlight">не открывать окна в офисе</span> в течение дня.</p>
+        <div class="footer">
+            <p>Это автоматическое уведомление от системы мониторинга погоды.</p>
+        </div>
+    </div>
+</body>
+</html>`
 
 // Конфигурация приложения
 type Config struct {
@@ -37,15 +106,29 @@ type WeatherResponse struct {
 }
 
 type DailyForecast struct {
-	Dt        int64         `json:"dt"`
-	WindSpeed float64       `json:"speed"`
-	WindGust  float64       `json:"gust"`
-	Weather   []WeatherDesc `json:"weather"`
+	Dt   int64 `json:"dt"`
+	Main struct {
+		Temp float64 `json:"temp"`
+	} `json:"main"`
+	Wind struct {
+		Speed float64 `json:"speed"`
+		Gust  float64 `json:"gust"`
+	} `json:"wind"`
+	Weather []WeatherDesc `json:"weather"`
 }
 
 type WeatherDesc struct {
 	Main        string `json:"main"`
 	Description string `json:"description"`
+}
+
+// Структура для Geocoding API
+type GeoLocation struct {
+	Name    string  `json:"name"`
+	Lat     float64 `json:"lat"`
+	Lon     float64 `json:"lon"`
+	Country string  `json:"country"`
+	State   string  `json:"state"`
 }
 
 // Загрузка конфигурации из переменных окружения
@@ -90,10 +173,48 @@ func loadConfig() (*Config, error) {
 	return config, nil
 }
 
-// Получение данных о погоде
-func getWeatherData(config *Config) (*WeatherResponse, error) {
-	url := fmt.Sprintf("https://api.openweathermap.org/data/2.5/forecast/daily?q=%s&units=metric&cnt=1&appid=%s",
+// Получение координат города с помощью Geocoding API
+func getGeoCoordinates(config *Config) (*GeoLocation, error) {
+	url := fmt.Sprintf("http://api.openweathermap.org/geo/1.0/direct?q=%s&limit=1&appid=%s",
 		config.City, config.OpenWeatherAPIKey)
+
+	resp, err := http.Get(url)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка при запросе к Geocoding API: %w", err)
+	}
+	defer resp.Body.Close()
+
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка при чтении ответа: %w", err)
+	}
+
+	var locations []GeoLocation
+	if err := json.Unmarshal(body, &locations); err != nil {
+		return nil, fmt.Errorf("ошибка при разборе JSON: %w", err)
+	}
+
+	if len(locations) == 0 {
+		return nil, fmt.Errorf("не найдены координаты для города: %s", config.City)
+	}
+
+	return &locations[0], nil
+}
+
+// Получение данных о погоде по координатам
+func getWeatherData(config *Config) (*WeatherResponse, error) {
+	// Получаем координаты города
+	location, err := getGeoCoordinates(config)
+	if err != nil {
+		return nil, fmt.Errorf("ошибка при получении координат: %w", err)
+	}
+
+	log.Printf("Получены координаты для %s: широта %.4f, долгота %.4f",
+		location.Name, location.Lat, location.Lon)
+
+	// Используем координаты для запроса прогноза погоды
+	url := fmt.Sprintf("https://api.openweathermap.org/data/2.5/forecast?lat=%.4f&lon=%.4f&units=metric&appid=%s",
+		location.Lat, location.Lon, config.OpenWeatherAPIKey)
 
 	resp, err := http.Get(url)
 	if err != nil {
@@ -114,35 +235,58 @@ func getWeatherData(config *Config) (*WeatherResponse, error) {
 	return &weatherData, nil
 }
 
-// Отправка электронного письма через Microsoft Exchange
-func sendEmail(config *Config, subject, body string) error {
-	auth := smtp.PlainAuth("", config.SMTPUser, config.SMTPPassword, config.SMTPServer)
-
-	// Формирование заголовков письма
-	header := make(map[string]string)
-	header["From"] = config.EmailFrom
-	header["To"] = config.EmailTo[0] // Для простоты берем первого получателя
-	header["Subject"] = subject
-	header["MIME-Version"] = "1.0"
-	header["Content-Type"] = "text/plain; charset=\"utf-8\""
-	header["Content-Transfer-Encoding"] = "base64"
-
-	// Формирование сообщения
-	message := ""
-	for k, v := range header {
-		message += fmt.Sprintf("%s: %s\r\n", k, v)
+// Отправка электронного письма через Microsoft Exchange с использованием библиотеки go-mail
+func sendEmail(config *Config, subject, htmlBody, plainTextBody string) error {
+	// Создание нового сообщения
+	msg := mail.NewMsg()
+	if err := msg.FromFormat("Система мониторинга погоды", config.EmailFrom); err != nil {
+		return fmt.Errorf("ошибка при указании отправителя: %w", err)
 	}
-	message += "\r\n" + body
 
-	// Отправка письма
-	err := smtp.SendMail(
-		config.SMTPServer+":"+config.SMTPPort,
-		auth,
-		config.EmailFrom,
-		config.EmailTo,
-		[]byte(message),
+	// Добавление получателей
+	for _, recipient := range config.EmailTo {
+		if err := msg.To(recipient); err != nil {
+			return fmt.Errorf("ошибка при указании получателя %s: %w", recipient, err)
+		}
+	}
+
+	// Установка темы письма
+	msg.Subject(subject)
+
+	// Установка HTML тела письма и текстовой альтернативы
+	msg.SetBodyString(mail.TypeTextHTML, htmlBody)
+	msg.AddAlternativeString(mail.TypeTextPlain, plainTextBody)
+
+	// Установка кодировки для поддержки кириллицы
+	msg.SetCharset(mail.CharsetUTF8)
+
+	// Парсинг порта
+	portInt, err := strconv.Atoi(config.SMTPPort)
+	if err != nil {
+		return fmt.Errorf("ошибка при парсинге порта: %w", err)
+	}
+
+	// Создание клиента с различными опциями для Microsoft Exchange
+	client, err := mail.NewClient(config.SMTPServer,
+		mail.WithPort(portInt),
+		mail.WithSMTPAuth(mail.SMTPAuthLogin), // Microsoft Exchange часто требует LOGIN аутентификацию
+		mail.WithUsername(config.SMTPUser),
+		mail.WithPassword(config.SMTPPassword),
+		mail.WithTLSPolicy(mail.TLSOpportunistic), // Пробуем STARTTLS, но продолжаем без него если не поддерживается
+		mail.WithTimeout(30*time.Second),          // Увеличенный таймаут
 	)
 	if err != nil {
+		return fmt.Errorf("ошибка при создании клиента: %w", err)
+	}
+
+	// Включаем отладочный режим
+	client.SetDebugLog(true)
+
+	// Отправка письма с контекстом для возможности отмены при длительных операциях
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	if err := client.DialAndSendWithContext(ctx, msg); err != nil {
 		return fmt.Errorf("ошибка при отправке письма: %w", err)
 	}
 
@@ -165,9 +309,9 @@ func checkWeatherAndAlert(config *Config) {
 		return
 	}
 
-	// Получение данных о ветре
+	// Получение данных о ветре из первого прогноза (ближайшего по времени)
 	todayForecast := weatherData.List[0]
-	windGust := todayForecast.WindGust
+	windGust := todayForecast.Wind.Gust
 
 	log.Printf("Текущие порывы ветра: %.2f м/с\n", windGust)
 
@@ -176,14 +320,19 @@ func checkWeatherAndAlert(config *Config) {
 		log.Println("Порывы ветра превышают пороговое значение, отправляю предупреждение...")
 
 		subject := "ВНИМАНИЕ: Сильный ветер сегодня"
-		body := fmt.Sprintf(
+
+		// Формирование HTML версии письма
+		htmlBody := fmt.Sprintf(emailHTMLTemplate, windGust, WindGustThreshold)
+
+		// Формирование текстовой версии письма (для клиентов без поддержки HTML)
+		plainTextBody := fmt.Sprintf(
 			"Внимание!\n\n"+
 				"Сегодня ожидаются сильные порывы ветра (%.2f м/с), что превышает безопасный порог (%.2f м/с).\n"+
 				"Рекомендуется не открывать окна в офисе в течение дня.\n\n"+
 				"Это автоматическое уведомление от системы мониторинга погоды.",
 			windGust, WindGustThreshold)
 
-		if err := sendEmail(config, subject, body); err != nil {
+		if err := sendEmail(config, subject, htmlBody, plainTextBody); err != nil {
 			log.Printf("Ошибка при отправке предупреждения: %v\n", err)
 		} else {
 			log.Println("Предупреждение успешно отправлено")
