@@ -32,6 +32,9 @@ ENV SMTP_SERVER="mail.agroconcern.ru"
 ENV SMTP_PORT="587"
 ENV SMTP_USER=""
 ENV SMTP_PASSWORD=""
+ENV WIND_GUST_THRESHOLD="15.0"
+ENV NOTIFICATION_HOUR="9"
+ENV NOTIFICATION_MIN="0"
 
 # Запуск приложения
 CMD ["./weather-alert"] 
