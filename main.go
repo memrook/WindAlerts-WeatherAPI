@@ -9,16 +9,11 @@ import (
 	"net/http"
 	"os"
 	"strconv"
+	"strings"
 	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/wneessen/go-mail"
-)
-
-// Константы для настройки приложения
-const (
-	WindGustThreshold = 15.0 // Пороговое значение для порывов ветра в м/с
-	CheckInterval     = 3 * time.Hour
 )
 
 // HTML шаблон для письма с предупреждением
@@ -63,6 +58,12 @@ const emailHTMLTemplate = `<!DOCTYPE html>
             color: #777777;
             text-align: center;
         }
+        ul {
+            margin-left: 20px;
+        }
+        li {
+            margin-bottom: 5px;
+        }
         @media only screen and (max-width: 600px) {
             .container {
                 padding: 10px;
@@ -79,7 +80,8 @@ const emailHTMLTemplate = `<!DOCTYPE html>
 <body>
     <div class="container">
         <h1>Внимание!</h1>
-        <p>Сегодня ожидаются <span class="highlight">сильные порывы ветра (%.2f м/с)</span>, что превышает безопасный порог (%.2f м/с).</p>
+        <p>Сегодня ожидаются <span class="highlight">сильные порывы ветра</span> до <span class="highlight">%.2f м/с</span>, что превышает безопасный порог (%.2f м/с).</p>
+        %s
         <p>Рекомендуется <span class="highlight">не открывать окна в офисе</span> в течение дня.</p>
         <div class="footer">
             <p>Это автоматическое уведомление от системы мониторинга погоды.</p>
@@ -87,6 +89,12 @@ const emailHTMLTemplate = `<!DOCTYPE html>
     </div>
 </body>
 </html>`
+
+// Структура для хранения времени прогноза с сильным ветром
+type WindGustForecast struct {
+	Time     time.Time
+	WindGust float64
+}
 
 // Конфигурация приложения
 type Config struct {
@@ -98,6 +106,9 @@ type Config struct {
 	SMTPPort          string
 	SMTPUser          string
 	SMTPPassword      string
+	WindGustThreshold float64 // Пороговое значение порывов ветра в м/с
+	NotificationHour  int     // Час отправки уведомления
+	NotificationMin   int     // Минуты отправки уведомления
 }
 
 // Структуры для парсинга ответа от OpenWeatherMap API
@@ -145,6 +156,36 @@ func loadConfig() (*Config, error) {
 		emailTo = []string{emailToStr}
 	}
 
+	// Настройки порога ветра и времени уведомления с значениями по умолчанию
+	windGustThreshold := 15.0 // По умолчанию 15 м/с
+	notificationHour := 9     // По умолчанию 9 часов
+	notificationMin := 0      // По умолчанию 0 минут
+
+	// Загрузка значений из переменных окружения, если они указаны
+	if envThreshold := os.Getenv("WIND_GUST_THRESHOLD"); envThreshold != "" {
+		if val, err := strconv.ParseFloat(envThreshold, 64); err == nil {
+			windGustThreshold = val
+		} else {
+			log.Printf("Ошибка парсинга WIND_GUST_THRESHOLD: %v, используется значение по умолчанию", err)
+		}
+	}
+
+	if envHour := os.Getenv("NOTIFICATION_HOUR"); envHour != "" {
+		if val, err := strconv.Atoi(envHour); err == nil && val >= 0 && val < 24 {
+			notificationHour = val
+		} else {
+			log.Printf("Ошибка парсинга NOTIFICATION_HOUR: %v, используется значение по умолчанию", err)
+		}
+	}
+
+	if envMin := os.Getenv("NOTIFICATION_MIN"); envMin != "" {
+		if val, err := strconv.Atoi(envMin); err == nil && val >= 0 && val < 60 {
+			notificationMin = val
+		} else {
+			log.Printf("Ошибка парсинга NOTIFICATION_MIN: %v, используется значение по умолчанию", err)
+		}
+	}
+
 	config := &Config{
 		OpenWeatherAPIKey: os.Getenv("OPENWEATHER_API_KEY"),
 		City:              os.Getenv("CITY"),
@@ -154,6 +195,9 @@ func loadConfig() (*Config, error) {
 		SMTPPort:          os.Getenv("SMTP_PORT"),
 		SMTPUser:          os.Getenv("SMTP_USER"),
 		SMTPPassword:      os.Getenv("SMTP_PASSWORD"),
+		WindGustThreshold: windGustThreshold,
+		NotificationHour:  notificationHour,
+		NotificationMin:   notificationMin,
 	}
 
 	// Проверка обязательных полей
@@ -293,6 +337,109 @@ func sendEmail(config *Config, subject, htmlBody, plainTextBody string) error {
 	return nil
 }
 
+// Проверка прогноза погоды на весь день и поиск сильных порывов ветра
+func checkWeatherForTheDay(weatherData *WeatherResponse, threshold float64) (bool, []WindGustForecast) {
+	now := time.Now()
+	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	endOfDay := startOfDay.Add(19 * time.Hour)
+
+	var forecasts []WindGustForecast
+	exceedsThreshold := false
+
+	for _, forecast := range weatherData.List {
+		// Преобразуем время прогноза
+		forecastTime := time.Unix(forecast.Dt, 0)
+
+		// Проверяем, что прогноз относится к текущему дню
+		if forecastTime.After(startOfDay) && forecastTime.Before(endOfDay) {
+			windGust := forecast.Wind.Gust
+
+			log.Printf("Прогноз на %s: порывы ветра %.2f м/с\n",
+				forecastTime.Format("15:04"), windGust)
+
+			// Если порывы ветра превышают порог
+			if windGust > threshold {
+				exceedsThreshold = true
+				forecasts = append(forecasts, WindGustForecast{
+					Time:     forecastTime,
+					WindGust: windGust,
+				})
+			}
+		}
+	}
+
+	// Сортируем прогнозы по силе ветра (необязательно)
+	// sort.Slice(forecasts, func(i, j int) bool {
+	//     return forecasts[i].WindGust > forecasts[j].WindGust
+	// })
+
+	return exceedsThreshold, forecasts
+}
+
+// Формирование HTML-блока с временными интервалами сильного ветра
+func formatWindGustTimeHTML(forecasts []WindGustForecast) string {
+	if len(forecasts) == 0 {
+		return ""
+	}
+
+	// Если ветер дует весь день, просто указываем на это
+	if len(forecasts) > 6 {
+		return "<p>Сильные порывы ветра ожидаются <span class=\"highlight\">в течение всего дня</span>.</p>"
+	}
+
+	var builder strings.Builder
+	builder.WriteString("<p>Сильные порывы ветра ожидаются в следующие часы:</p>")
+	builder.WriteString("<ul>")
+
+	for _, forecast := range forecasts {
+		timeStr := forecast.Time.Format("15:04")
+		builder.WriteString(fmt.Sprintf("<li>%s - <span class=\"highlight\">%.2f м/с</span></li>",
+			timeStr, forecast.WindGust))
+	}
+
+	builder.WriteString("</ul>")
+	return builder.String()
+}
+
+// Формирование текстового блока с временными интервалами сильного ветра
+func formatWindGustTimePlain(forecasts []WindGustForecast) string {
+	if len(forecasts) == 0 {
+		return ""
+	}
+
+	// Если ветер дует весь день, просто указываем на это
+	if len(forecasts) > 6 {
+		return "Сильные порывы ветра ожидаются в течение всего дня.\n"
+	}
+
+	var builder strings.Builder
+	builder.WriteString("Сильные порывы ветра ожидаются в следующие часы:\n")
+
+	for _, forecast := range forecasts {
+		timeStr := forecast.Time.Format("15:04")
+		builder.WriteString(fmt.Sprintf("- %s - %.2f м/с\n", timeStr, forecast.WindGust))
+	}
+
+	builder.WriteString("\n")
+	return builder.String()
+}
+
+// Нахождение максимального значения порыва ветра
+func findMaxWindGust(forecasts []WindGustForecast) float64 {
+	if len(forecasts) == 0 {
+		return 0
+	}
+
+	max := forecasts[0].WindGust
+	for _, forecast := range forecasts {
+		if forecast.WindGust > max {
+			max = forecast.WindGust
+		}
+	}
+
+	return max
+}
+
 // Проверка погоды и отправка предупреждения
 func checkWeatherAndAlert(config *Config) {
 	log.Println("Запуск проверки погодных условий...")
@@ -309,28 +456,32 @@ func checkWeatherAndAlert(config *Config) {
 		return
 	}
 
-	// Получение данных о ветре из первого прогноза (ближайшего по времени)
-	todayForecast := weatherData.List[0]
-	windGust := todayForecast.Wind.Gust
+	// Проверяем весь день на наличие сильных порывов ветра
+	exceedsThreshold, forecasts := checkWeatherForTheDay(weatherData, config.WindGustThreshold)
 
-	log.Printf("Текущие порывы ветра: %.2f м/с\n", windGust)
+	if exceedsThreshold {
+		log.Println("Порывы ветра превышают пороговое значение в течение дня, отправляю предупреждение...")
 
-	// Проверка превышения порога
-	if windGust > WindGustThreshold {
-		log.Println("Порывы ветра превышают пороговое значение, отправляю предупреждение...")
+		// Получаем максимальную силу ветра за день
+		maxWindGust := findMaxWindGust(forecasts)
+
+		// Формируем блоки с информацией о времени сильного ветра
+		timeBlockHTML := formatWindGustTimeHTML(forecasts)
+		timeBlockPlain := formatWindGustTimePlain(forecasts)
 
 		subject := "ВНИМАНИЕ: Сильный ветер сегодня"
 
 		// Формирование HTML версии письма
-		htmlBody := fmt.Sprintf(emailHTMLTemplate, windGust, WindGustThreshold)
+		htmlBody := fmt.Sprintf(emailHTMLTemplate, maxWindGust, config.WindGustThreshold, timeBlockHTML)
 
 		// Формирование текстовой версии письма (для клиентов без поддержки HTML)
 		plainTextBody := fmt.Sprintf(
 			"Внимание!\n\n"+
-				"Сегодня ожидаются сильные порывы ветра (%.2f м/с), что превышает безопасный порог (%.2f м/с).\n"+
+				"Сегодня ожидаются сильные порывы ветра до %.2f м/с, что превышает безопасный порог (%.2f м/с).\n"+
+				"%s"+
 				"Рекомендуется не открывать окна в офисе в течение дня.\n\n"+
 				"Это автоматическое уведомление от системы мониторинга погоды.",
-			windGust, WindGustThreshold)
+			maxWindGust, config.WindGustThreshold, timeBlockPlain)
 
 		if err := sendEmail(config, subject, htmlBody, plainTextBody); err != nil {
 			log.Printf("Ошибка при отправке предупреждения: %v\n", err)
@@ -338,8 +489,21 @@ func checkWeatherAndAlert(config *Config) {
 			log.Println("Предупреждение успешно отправлено")
 		}
 	} else {
-		log.Println("Порывы ветра в норме, предупреждение не требуется")
+		log.Println("Порывы ветра в норме на весь день, предупреждение не требуется")
 	}
+}
+
+// Получение следующего времени отправки
+func getNextSendTime(config *Config) time.Time {
+	now := time.Now()
+	nextSend := time.Date(now.Year(), now.Month(), now.Day(), config.NotificationHour, config.NotificationMin, 0, 0, now.Location())
+
+	// Если уже позже времени отправки, переходим на следующий день
+	if now.After(nextSend) {
+		nextSend = nextSend.Add(24 * time.Hour)
+	}
+
+	return nextSend
 }
 
 func main() {
@@ -351,17 +515,32 @@ func main() {
 		log.Fatalf("Ошибка при загрузке конфигурации: %v", err)
 	}
 
-	// Первая проверка сразу при запуске
-	checkWeatherAndAlert(config)
+	log.Printf("Загружена конфигурация: порог ветра = %.2f м/с, время отправки = %02d:%02d",
+		config.WindGustThreshold, config.NotificationHour, config.NotificationMin)
 
-	// Настройка периодических проверок
-	ticker := time.NewTicker(CheckInterval)
-	defer ticker.Stop()
+	// Запускаем первую проверку сразу при старте (но уведомление отправляем только если сейчас время отправки)
+	now := time.Now()
+	if now.Hour() == config.NotificationHour && now.Minute() >= config.NotificationMin && now.Minute() < config.NotificationMin+5 {
+		// Запускаем проверку только если мы находимся в 5-минутном окне после времени отправки
+		checkWeatherAndAlert(config)
+	} else {
+		log.Printf("Первая проверка будет выполнена в %02d:%02d", config.NotificationHour, config.NotificationMin)
+	}
 
+	// Основной цикл программы
 	for {
-		select {
-		case <-ticker.C:
-			checkWeatherAndAlert(config)
-		}
+		// Получаем время следующей отправки
+		nextSend := getNextSendTime(config)
+
+		// Вычисляем время ожидания до следующей отправки
+		waitDuration := nextSend.Sub(time.Now())
+		log.Printf("Следующая проверка запланирована на %s (через %s)",
+			nextSend.Format("2006-01-02 15:04:05"), waitDuration.String())
+
+		// Ждем до следующего времени отправки
+		time.Sleep(waitDuration)
+
+		// Выполняем проверку и отправку
+		checkWeatherAndAlert(config)
 	}
 }
