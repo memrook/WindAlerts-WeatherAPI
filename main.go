@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -10,85 +11,12 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"text/template"
 	"time"
 
 	"github.com/joho/godotenv"
 	"github.com/wneessen/go-mail"
 )
-
-// HTML шаблон для письма с предупреждением
-const emailHTMLTemplate = `<!DOCTYPE html>
-<html lang="ru">
-<head>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Уведомление о погоде</title>
-    <style>
-        body {
-            font-family: Arial, sans-serif;
-            background-color: #f4f4f4;
-            margin: 0;
-            padding: 20px;
-        }
-        .container {
-            max-width: 600px;
-            margin: 0 auto;
-            background-color: #ffffff;
-            padding: 20px;
-            border-radius: 8px;
-            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
-        }
-        h1 {
-            color: #d9534f;
-            font-size: 24px;
-            text-align: center;
-        }
-        p {
-            font-size: 16px;
-            line-height: 1.5;
-            color: #333333;
-        }
-        .highlight {
-            font-weight: bold;
-            color: #d9534f;
-        }
-        .footer {
-            margin-top: 20px;
-            font-size: 14px;
-            color: #777777;
-            text-align: center;
-        }
-        ul {
-            margin-left: 20px;
-        }
-        li {
-            margin-bottom: 5px;
-        }
-        @media only screen and (max-width: 600px) {
-            .container {
-                padding: 10px;
-            }
-            h1 {
-                font-size: 20px;
-            }
-            p {
-                font-size: 14px;
-            }
-        }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>Внимание!</h1>
-        <p>Сегодня ожидаются <span class="highlight">сильные порывы ветра</span> до <span class="highlight">%.2f м/с</span>, что превышает безопасный порог (%.2f м/с).</p>
-        %s
-        <p>Рекомендуется <span class="highlight">не открывать окна в офисе</span> в течение дня.</p>
-        <div class="footer">
-            <p>Это автоматическое уведомление от системы мониторинга погоды.</p>
-        </div>
-    </div>
-</body>
-</html>`
 
 // Структура для хранения времени прогноза с сильным ветром
 type WindGustForecast struct {
@@ -110,6 +38,133 @@ type Config struct {
 	NotificationHour  int     // Час отправки уведомления
 	NotificationMin   int     // Минуты отправки уведомления
 }
+
+// Структура данных для шаблона электронного письма
+type EmailData struct {
+	MaxWindGust       float64
+	WindGustThreshold float64
+}
+
+// Шаблон для HTML письма
+const emailHTMLTemplateText = `<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Уведомление о погоде</title>
+    <!--[if mso]>
+    <style type="text/css">
+        table, td {border-collapse: collapse; mso-table-lspace: 0pt; mso-table-rspace: 0pt;}
+        .container {width: 600px;}
+    </style>
+    <![endif]-->
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            background-color: #f4f4f4;
+            margin: 0;
+            padding: 0;
+        }
+        .main-table {
+            width: 100%;
+            background-color: #f4f4f4;
+        }
+        .container {
+            width: 600px;
+            max-width: 600px;
+            margin: 0 auto;
+            background-color: #ffffff;
+            border-radius: 8px;
+            box-shadow: 0 0 10px rgba(0, 0, 0, 0.1);
+        }
+        .content {
+            padding: 20px;
+        }
+        h1 {
+            color: #d9534f;
+            font-size: 24px;
+            text-align: center;
+            margin-top: 0;
+            margin-bottom: 20px;
+        }
+        p {
+            font-size: 16px;
+            line-height: 1.5;
+            color: #333333;
+            margin-top: 0;
+            margin-bottom: 15px;
+        }
+        .highlight {
+            font-weight: bold;
+            color: #d9534f;
+        }
+        .footer {
+            margin-top: 20px;
+            font-size: 14px;
+            color: #777777;
+            text-align: center;
+        }
+        @media only screen and (max-width: 600px) {
+            .container {
+                width: 100% !important;
+                max-width: 100% !important;
+            }
+            .content {
+                padding: 10px !important;
+            }
+            h1 {
+                font-size: 20px !important;
+            }
+            p {
+                font-size: 14px !important;
+            }
+        }
+    </style>
+</head>
+<body style="margin: 0; padding: 0; background-color: #f4f4f4;">
+    <!--[if mso]>
+    <table border="0" cellpadding="0" cellspacing="0" width="100%" bgcolor="#f4f4f4">
+    <tr>
+    <td align="center">
+    <table border="0" cellpadding="0" cellspacing="0" width="600" class="container">
+    <![endif]-->
+    
+    <table border="0" cellpadding="0" cellspacing="0" width="100%" class="main-table" bgcolor="#f4f4f4" style="background-color: #f4f4f4;">
+        <tr>
+            <td align="center" style="padding: 20px 0;">
+                <table border="0" cellpadding="0" cellspacing="0" width="600" class="container" style="background-color: #ffffff; border-radius: 8px; box-shadow: 0 0 10px rgba(0, 0, 0, 0.1); max-width: 600px; width: 100%;">
+                    <tr>
+                        <td class="content" style="padding: 20px;">
+                            <h1 style="color: #d9534f; font-size: 24px; text-align: center; margin-top: 0; margin-bottom: 20px;">Внимание!</h1>
+                            <p style="font-size: 16px; line-height: 1.5; color: #333333; margin-top: 0; margin-bottom: 15px;">Сегодня ожидаются <span class="highlight" style="font-weight: bold; color: #d9534f;">сильные порывы ветра ({{printf "%.2f" .MaxWindGust}} м/с)</span>, что превышает безопасный порог (<span class="highlight" style="font-weight: bold; color: #d9534f;">{{printf "%.2f" .WindGustThreshold}} м/с</span>).</p>
+                            <p style="font-size: 16px; line-height: 1.5; color: #333333; margin-top: 0; margin-bottom: 15px;">Рекомендуется <span class="highlight" style="font-weight: bold; color: #d9534f;">не открывать окна в офисе</span> в течение дня.</p>
+                            <div class="footer" style="margin-top: 20px; font-size: 14px; color: #777777; text-align: center;">
+                                <p style="font-size: 14px; line-height: 1.5; color: #777777; margin-top: 0; margin-bottom: 15px;">Это автоматическое уведомление от системы мониторинга погоды.</p>
+                            </div>
+                        </td>
+                    </tr>
+                </table>
+            </td>
+        </tr>
+    </table>
+    
+    <!--[if mso]>
+    </table>
+    </td>
+    </tr>
+    </table>
+    <![endif]-->
+</body>
+</html>`
+
+// Шаблон для текстового письма
+const emailPlainTextTemplate = `Внимание!
+
+Сегодня ожидаются сильные порывы ветра ({{printf "%.2f" .MaxWindGust}} м/с), что превышает безопасный порог ({{printf "%.2f" .WindGustThreshold}} м/с).
+
+Рекомендуется не открывать окна в офисе в течение дня.
+
+Это автоматическое уведомление от системы мониторинга погоды.`
 
 // Структуры для парсинга ответа от OpenWeatherMap API
 type WeatherResponse struct {
@@ -149,11 +204,32 @@ func loadConfig() (*Config, error) {
 		log.Println("Предупреждение: Файл .env не найден, используются переменные окружения системы")
 	}
 
-	// Получение списка адресов из строки, разделенной запятыми
+	// Получение списка адресов из строки, разделенной запятыми или точкой с запятой
 	emailToStr := os.Getenv("EMAIL_TO")
 	var emailTo []string
 	if emailToStr != "" {
-		emailTo = []string{emailToStr}
+		// Поддержка разделителей "," или ";"
+		if strings.Contains(emailToStr, ",") {
+			emailTo = strings.Split(emailToStr, ",")
+		} else if strings.Contains(emailToStr, ";") {
+			emailTo = strings.Split(emailToStr, ";")
+		} else {
+			emailTo = []string{emailToStr}
+		}
+
+		// Очистка от лишних пробелов в адресах
+		for i := range emailTo {
+			emailTo[i] = strings.TrimSpace(emailTo[i])
+		}
+
+		// Удаление пустых адресов
+		var cleanEmailTo []string
+		for _, email := range emailTo {
+			if email != "" {
+				cleanEmailTo = append(cleanEmailTo, email)
+			}
+		}
+		emailTo = cleanEmailTo
 	}
 
 	// Настройки порога ветра и времени уведомления с значениями по умолчанию
@@ -288,10 +364,8 @@ func sendEmail(config *Config, subject, htmlBody, plainTextBody string) error {
 	}
 
 	// Добавление получателей
-	for _, recipient := range config.EmailTo {
-		if err := msg.To(recipient); err != nil {
-			return fmt.Errorf("ошибка при указании получателя %s: %w", recipient, err)
-		}
+	if err := msg.To(config.EmailTo...); err != nil {
+		return fmt.Errorf("ошибка при указании получателя %s: %w", config.EmailTo, err)
 	}
 
 	// Установка темы письма
@@ -376,54 +450,6 @@ func checkWeatherForTheDay(weatherData *WeatherResponse, threshold float64) (boo
 	return exceedsThreshold, forecasts
 }
 
-// Формирование HTML-блока с временными интервалами сильного ветра
-func formatWindGustTimeHTML(forecasts []WindGustForecast) string {
-	if len(forecasts) == 0 {
-		return ""
-	}
-
-	// Если ветер дует весь день, просто указываем на это
-	if len(forecasts) > 6 {
-		return "<p>Сильные порывы ветра ожидаются <span class=\"highlight\">в течение всего дня</span>.</p>"
-	}
-
-	var builder strings.Builder
-	builder.WriteString("<p>Сильные порывы ветра ожидаются в следующие часы:</p>")
-	builder.WriteString("<ul>")
-
-	for _, forecast := range forecasts {
-		timeStr := forecast.Time.Format("15:04")
-		builder.WriteString(fmt.Sprintf("<li>%s - <span class=\"highlight\">%.2f м/с</span></li>",
-			timeStr, forecast.WindGust))
-	}
-
-	builder.WriteString("</ul>")
-	return builder.String()
-}
-
-// Формирование текстового блока с временными интервалами сильного ветра
-func formatWindGustTimePlain(forecasts []WindGustForecast) string {
-	if len(forecasts) == 0 {
-		return ""
-	}
-
-	// Если ветер дует весь день, просто указываем на это
-	if len(forecasts) > 6 {
-		return "Сильные порывы ветра ожидаются в течение всего дня.\n"
-	}
-
-	var builder strings.Builder
-	builder.WriteString("Сильные порывы ветра ожидаются в следующие часы:\n")
-
-	for _, forecast := range forecasts {
-		timeStr := forecast.Time.Format("15:04")
-		builder.WriteString(fmt.Sprintf("- %s - %.2f м/с\n", timeStr, forecast.WindGust))
-	}
-
-	builder.WriteString("\n")
-	return builder.String()
-}
-
 // Нахождение максимального значения порыва ветра
 func findMaxWindGust(forecasts []WindGustForecast) float64 {
 	if len(forecasts) == 0 {
@@ -438,6 +464,38 @@ func findMaxWindGust(forecasts []WindGustForecast) float64 {
 	}
 
 	return max
+}
+
+// Формирование HTML и текстового тела письма с использованием шаблонов
+func generateEmailBodies(maxWindGust, windGustThreshold float64) (string, string, error) {
+	data := EmailData{
+		MaxWindGust:       maxWindGust,
+		WindGustThreshold: windGustThreshold,
+	}
+
+	// Создание HTML-тела письма
+	htmlTemplate, err := template.New("emailHTML").Parse(emailHTMLTemplateText)
+	if err != nil {
+		return "", "", fmt.Errorf("ошибка при парсинге HTML шаблона: %w", err)
+	}
+
+	var htmlBuffer bytes.Buffer
+	if err := htmlTemplate.Execute(&htmlBuffer, data); err != nil {
+		return "", "", fmt.Errorf("ошибка при формировании HTML письма: %w", err)
+	}
+
+	// Создание текстового тела письма
+	textTemplate, err := template.New("emailText").Parse(emailPlainTextTemplate)
+	if err != nil {
+		return "", "", fmt.Errorf("ошибка при парсинге текстового шаблона: %w", err)
+	}
+
+	var textBuffer bytes.Buffer
+	if err := textTemplate.Execute(&textBuffer, data); err != nil {
+		return "", "", fmt.Errorf("ошибка при формировании текстового письма: %w", err)
+	}
+
+	return htmlBuffer.String(), textBuffer.String(), nil
 }
 
 // Проверка погоды и отправка предупреждения
@@ -465,23 +523,14 @@ func checkWeatherAndAlert(config *Config) {
 		// Получаем максимальную силу ветра за день
 		maxWindGust := findMaxWindGust(forecasts)
 
-		// Формируем блоки с информацией о времени сильного ветра
-		timeBlockHTML := formatWindGustTimeHTML(forecasts)
-		timeBlockPlain := formatWindGustTimePlain(forecasts)
-
 		subject := "ВНИМАНИЕ: Сильный ветер сегодня"
 
-		// Формирование HTML версии письма
-		htmlBody := fmt.Sprintf(emailHTMLTemplate, maxWindGust, config.WindGustThreshold, timeBlockHTML)
-
-		// Формирование текстовой версии письма (для клиентов без поддержки HTML)
-		plainTextBody := fmt.Sprintf(
-			"Внимание!\n\n"+
-				"Сегодня ожидаются сильные порывы ветра до %.2f м/с, что превышает безопасный порог (%.2f м/с).\n"+
-				"%s"+
-				"Рекомендуется не открывать окна в офисе в течение дня.\n\n"+
-				"Это автоматическое уведомление от системы мониторинга погоды.",
-			maxWindGust, config.WindGustThreshold, timeBlockPlain)
+		// Формирование HTML и текстовой версий письма с использованием шаблонов
+		htmlBody, plainTextBody, err := generateEmailBodies(maxWindGust, config.WindGustThreshold)
+		if err != nil {
+			log.Printf("Ошибка при формировании письма: %v\n", err)
+			return
+		}
 
 		if err := sendEmail(config, subject, htmlBody, plainTextBody); err != nil {
 			log.Printf("Ошибка при отправке предупреждения: %v\n", err)
@@ -515,7 +564,7 @@ func main() {
 		log.Fatalf("Ошибка при загрузке конфигурации: %v", err)
 	}
 
-	log.Printf("Загружена конфигурация: порог ветра = %.2f м/с, время отправки = %02d:%02d",
+	log.Printf("Загружена конфигурация: порог ветра = %.2f м/s, время отправки = %02d:%02d",
 		config.WindGustThreshold, config.NotificationHour, config.NotificationMin)
 
 	// Запускаем первую проверку сразу при старте (но уведомление отправляем только если сейчас время отправки)
